@@ -333,7 +333,7 @@ class FlashVSRNodeInitPipe:
         return {
             "required": {
                 "model": (["FlashVSR", "FlashVSR-v1.1"], {
-                    "default": "1.0",
+                    "default": "FlashVSR-v1.1",
                     "tooltip": "Model version."
                 }),
                 "mode": (["tiny", "tiny-long", "full"], {
@@ -492,7 +492,7 @@ class FlashVSRNode:
                     "tooltip": "Sequential video frames as IMAGE tensor batch"
                 }),
                 "model": (["FlashVSR", "FlashVSR-v1.1"], {
-                    "default": "1.0",
+                    "default": "FlashVSR-v1.1",
                     "tooltip": "Model version."
                 }),
                 "mode": (["tiny", "tiny-long", "full"], {
