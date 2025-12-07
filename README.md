@@ -4,6 +4,7 @@ Running FlashVSR on lower VRAM without any artifacts.
 ## Changelog
 
 #### 07.12.2025
+- **Bug Fix**: Fixed `AttributeError` in `full` mode by adding a fallback mechanism to manually load the VAE model if the model manager fails.
 - **Bug Fix**: Fixed the progress bar to correctly display status in ComfyUI using the `cqdm` wrapper. Added text-based progress bar to logs.
 - **Sync**: Enabled VAE spatial tiling for `tiny` mode, bringing VRAM savings from `tiny-long` to the standard fast pipeline.
 - **Documentation**: Expanded tooltips for all node parameters and added detailed usage instructions to README.
@@ -61,7 +62,7 @@ Hover over any input in ComfyUI to see these details:
 - **mode**:
   - `tiny`: Standard fast mode. Now supports VAE tiling.
   - `tiny-long`: Streaming mode for very long videos. Lowest VRAM spike.
-  - `full`: Uses the full VAE encoder (optional). Highest VRAM.
+  - `full`: Uses the full VAE encoder (optional). Highest VRAM. Supports VAE tiling.
 - **scale**: Upscaling factor (2x or 4x).
 - **color_fix**: Corrects color shifts using wavelet transfer. Highly recommended.
 - **tiled_vae**: Spatially splits frames during decoding. Saves massive VRAM at the cost of speed.

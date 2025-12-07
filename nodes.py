@@ -20,11 +20,13 @@ try:
     from .src.models.TCDecoder import build_tcdecoder
     from .src.models.utils import clean_vram, get_device_list, Buffer_LQ4x_Proj, Causal_LQ4x_Proj
     from .src.models import wan_video_dit
+    from .src.models.wan_video_vae import WanVideoVAE
 except ImportError:
     from src import ModelManager, FlashVSRFullPipeline, FlashVSRTinyPipeline, FlashVSRTinyLongPipeline
     from src.models.TCDecoder import build_tcdecoder
     from src.models.utils import clean_vram, get_device_list, Buffer_LQ4x_Proj, Causal_LQ4x_Proj
     from src.models import wan_video_dit
+    from src.models.wan_video_vae import WanVideoVAE
 
 device_choices = get_device_list()
 
@@ -200,6 +202,20 @@ def init_pipeline(model, mode, device, dtype, alt_vae="none"):
     if mode == "full":
         mm.load_models([ckpt_path, vae_path])
         pipe = FlashVSRFullPipeline.from_model_manager(mm, device=device)
+
+        # Manual VAE loading fallback if ModelManager fails
+        if pipe.vae is None:
+            log("ModelManager failed to load VAE. Attempting manual load...", message_type='warning', icon="⚠️")
+            try:
+                pipe.vae = WanVideoVAE(z_dim=16, dim=96).to(device=device, dtype=dtype)
+                # Load state dict
+                sd = torch.load(vae_path, map_location="cpu")
+                pipe.vae.load_state_dict(sd)
+                log(f"Manually loaded VAE from {vae_path}", message_type='info', icon="📦")
+            except Exception as e:
+                log(f"Failed to manually load VAE: {e}", message_type='error', icon="❌")
+                raise RuntimeError(f"Could not load VAE from {vae_path}")
+
         pipe.vae.model.encoder = None
         pipe.vae.model.conv1 = None
     else:
@@ -287,11 +303,7 @@ class cqdm:
                 msg += f" | {step_time:.2f}s/step"
                 log_resource_usage(prefix=msg)
             else:
-                # Always log progress if requested, but maybe less verbose?
-                # User said "Show a progress bar for every action in the log."
-                # Printing every step might span console.
-                # Use \r to overwrite? ComfyUI console usually supports it but logging function might print newline.
-                # 'log' function prints with flush=True.
+                # Use logging to print progress to console
                 print(f"\r{msg}", end="", flush=True)
                 if self.step_idx == self.total:
                     print() # Newline at end
@@ -358,7 +370,7 @@ def process_chunk(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_siz
                     LQ_video=LQ_tile, num_frames=F, height=th, width=tw, is_full_block=False, if_buffer=True,
                     topk_ratio=sparse_ratio*768*1280/(th*tw), kv_ratio=kv_ratio, local_range=local_range,
                     color_fix=color_fix, unload_dit=unload_dit, force_offload=force_offload,
-                    enable_debug_logging=enable_debug
+                    enable_debug_logging=enable_debug # Pass debug flag if supported by pipe
                 )
             except torch.OutOfMemoryError as e:
                 log(f"OOM during Tiled Processing! Try reducing tile_size or enabling tiled_vae if not enabled.", message_type='error', icon="❌")
