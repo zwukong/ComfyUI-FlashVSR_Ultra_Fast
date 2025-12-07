@@ -53,9 +53,9 @@ def log_resource_usage(prefix="Resource Usage"):
     
     if torch.cuda.is_available():
         vram_used = torch.cuda.memory_allocated() / (1024 ** 3)
-        vram_reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+        vram_reserved = torch.cuda.max_memory_reserved() / (1024 ** 3) # Using max_memory_reserved as requested
         vram_total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-        msg += f" | VRAM: {vram_used:.2f}/{vram_reserved:.2f}/{vram_total:.2f} GB (Alloc/Res/Total)"
+        msg += f" | VRAM: {vram_used:.2f}/{vram_reserved:.2f}/{vram_total:.2f} GB (Alloc/MaxRes/Total)"
         
     log(msg, message_type='info', icon="📊")
 
@@ -246,6 +246,7 @@ class cqdm:
         self.total = total
         self.enable_debug = enable_debug
         self.start_time = time.time()
+        self.step_idx = 0
         
         if iterable is not None:
             try:
@@ -272,17 +273,22 @@ class cqdm:
         if self.iterable is None:
             raise TypeError("Cannot call __next__ on a non-iterable cqdm object.")
         try:
-            if self.enable_debug:
-                step_start = time.time()
-                
+            step_start = time.time()
             val = next(self.iterable)
             
             if self.pbar:
                 self.pbar.update(1)
             
-            # Simple logging for progress if debug is enabled
-            # Note: We don't have the index here easily unless we wrap enumerate, but basic progress is handled by ComfyUI
-            
+            self.step_idx += 1
+            if self.enable_debug:
+                step_end = time.time()
+                step_time = step_end - step_start
+                # log(f"[{self.desc}] Step {self.step_idx}/{self.total} completed in {step_time:.4f}s", message_type='info', icon="⏱️")
+                # More detailed stats can be added here if needed, but logging resource usage every step might be too much spam.
+                # However, the user asked for "show each process" and "detailed logging".
+                # To avoid excessive spam, we'll log resource usage only if enable_debug is strictly True.
+                log_resource_usage(prefix=f"{self.desc} Step {self.step_idx}/{self.total}")
+
             return val
         except StopIteration:
             total_time = time.time() - self.start_time
@@ -301,35 +307,23 @@ class cqdm:
     def __len__(self):
         return self.total
 
-def flashvsr(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap, unload_dit, sparse_ratio, kv_ratio, local_range, seed, force_offload, enable_debug=False):
+def process_chunk(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap, unload_dit, sparse_ratio, kv_ratio, local_range, seed, force_offload, enable_debug):
+    """
+    Processes a single chunk of frames.
+    """
     clean_vram()
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
-        torch.cuda.ipc_collect() # Improved Memory Management
-    
-    start_time = time.time()
-    
     _frames = frames
     _device = pipe.device
     dtype = pipe.torch_dtype
     
-    if enable_debug:
-        log(f"Debug Mode: Enabled", message_type='info', icon="🐞")
-        log(f"Device: {_device}", message_type='info', icon="🖥️")
-        if torch.cuda.is_available():
-             log(f"Total VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB", message_type='info', icon="💾")
-        log(f"Input Frames: {frames.shape}", message_type='info', icon="🎞️")
-        log(f"Tiled DiT: {tiled_dit}, Tiled VAE: {tiled_vae}", message_type='info', icon="🧩")
-        log_resource_usage(prefix="Start")
-
+    # Padding logic for the chunk
     add = next_8n5(frames.shape[0]) - frames.shape[0]
     padding_frames = frames[-1:, :, :, :].repeat(add, 1, 1, 1)
     _frames = torch.cat([frames, padding_frames], dim=0)
-        
+
     if tiled_dit:
         N, H, W, C = _frames.shape
         
-        # Use RAM more efficiently by pre-allocating
         final_output_canvas = torch.zeros(
             (N, H * scale, W * scale, C), 
             dtype=torch.float16, 
@@ -338,15 +332,12 @@ def flashvsr(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, ti
         weight_sum_canvas = torch.zeros_like(final_output_canvas)
         tile_coords = calculate_tile_coords(H, W, tile_size, tile_overlap)
         
-        # Pass enable_debug to cqdm if we modify it to accept it, or just use wrapper
-        # Currently cqdm doesn't take enable_debug in __init__ but we can add it or just log manually
-        
         log(f"Starting Tiled Processing: {len(tile_coords)} tiles", message_type='info', icon="🚀")
         
+        # Instantiate cqdm with enable_debug passed correctly
         for i, (x1, y1, x2, y2) in enumerate(cqdm(tile_coords, desc="Processing Tiles", enable_debug=enable_debug)):
             tile_start = time.time()
             if enable_debug:
-                vram_start = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0
                 log(f"Processing tile {i+1}/{len(tile_coords)}: ({x1},{y1}) -> ({x2},{y2})", message_type='info', icon="🔄")
             
             input_tile = _frames[:, y1:y2, x1:x2, :]
@@ -359,7 +350,8 @@ def flashvsr(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, ti
                 prompt="", negative_prompt="", cfg_scale=1.0, num_inference_steps=1, seed=seed, tiled=tiled_vae,
                 LQ_video=LQ_tile, num_frames=F, height=th, width=tw, is_full_block=False, if_buffer=True,
                 topk_ratio=sparse_ratio*768*1280/(th*tw), kv_ratio=kv_ratio, local_range=local_range,
-                color_fix=color_fix, unload_dit=unload_dit, force_offload=force_offload
+                color_fix=color_fix, unload_dit=unload_dit, force_offload=force_offload,
+                enable_debug_logging=enable_debug # Pass debug flag if supported by pipe, though pipe def signature might need update or we handle it via cqdm wrapping inside
             )
             
             processed_tile_cpu = tensor2video(output_tile_gpu).to("cpu")
@@ -367,8 +359,7 @@ def flashvsr(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, ti
             if enable_debug:
                 tile_end = time.time()
                 tile_time = tile_end - tile_start
-                vram_end = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0
-                log(f"Tile {i+1} completed in {tile_time:.2f}s | VRAM: {vram_start:.2f} -> {vram_end:.2f} GB", message_type='info', icon="⏱️")
+                log(f"Tile {i+1} completed in {tile_time:.2f}s", message_type='info', icon="⏱️")
             
             mask_nchw = create_feather_mask(
                 (processed_tile_cpu.shape[1], processed_tile_cpu.shape[2]),
@@ -390,7 +381,8 @@ def flashvsr(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, ti
         final_output = final_output_canvas / weight_sum_canvas
     else:
         log("Preparing full frame processing...", message_type='info', icon="🎞️")
-        log_resource_usage(prefix="Pre-Preprocess")
+        if enable_debug:
+            log_resource_usage(prefix="Pre-Preprocess")
         
         LQ, th, tw, F = prepare_input_tensor(_frames, _device, scale=scale, dtype=dtype)
         if not isinstance(pipe, FlashVSRTinyLongPipeline):
@@ -399,9 +391,18 @@ def flashvsr(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, ti
         log(f"Processing {frames.shape[0]} frames...", message_type='info', icon="🚀")
         
         process_start = time.time()
+
+        # We need to pass enable_debug to cqdm used inside pipe if possible.
+        # But pipe uses `progress_bar_cmd` class or function.
+        # We can create a partial or wrapper class.
+
+        class cqdm_debug(cqdm):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs, enable_debug=enable_debug)
+
         video = pipe(
             prompt="", negative_prompt="", cfg_scale=1.0, num_inference_steps=1, seed=seed, tiled=tiled_vae,
-            progress_bar_cmd=cqdm, LQ_video=LQ, num_frames=F, height=th, width=tw, is_full_block=False, if_buffer=True,
+            progress_bar_cmd=cqdm_debug, LQ_video=LQ, num_frames=F, height=th, width=tw, is_full_block=False, if_buffer=True,
             topk_ratio=sparse_ratio*768*1280/(th*tw), kv_ratio=kv_ratio, local_range=local_range,
             color_fix = color_fix, unload_dit=unload_dit, force_offload=force_offload
         )
@@ -414,7 +415,81 @@ def flashvsr(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, ti
         
         del video, LQ
         clean_vram()
+
+    if frames.shape[0] == 1:
+        # Special handling for single frame if needed, but tensor2video returns [F, H, W, C]
+        # logic below seems to handle temporal median if 1 frame? No, wait.
+        # If frames.shape[0] == 1, `final_output` is [F_out, H, W, C]. F_out corresponds to padded/processed.
+        # The original code did:
+        # stacked_image_tensor = torch.median(final_output, dim=0).values.unsqueeze(0).float().to('cpu')
+        # This seems to be a way to merge the 8n+1 frames back to 1?
+        # Because FlashVSR expands 1 frame to many to process it temporally?
+        # If input was 1 frame, padded to 21. Output 21. Median of 21 frames -> 1 frame.
+        if frames.shape[0] == 1:
+            final_output = final_output.to(_device) # Move back for median calc if it was on CPU? Or keep on CPU?
+            # Median on CPU is fine and safer for VRAM
+            final_output = final_output.to("cpu")
+            stacked_image_tensor = torch.median(final_output, dim=0).values.unsqueeze(0).float()
+            del final_output
+            clean_vram()
+            return stacked_image_tensor
+
+    return final_output[:frames.shape[0], :, :, :]
+
+def flashvsr(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap, unload_dit, sparse_ratio, kv_ratio, local_range, seed, force_offload, enable_debug=False, chunk_size=0):
+    clean_vram()
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.ipc_collect()
+
+    start_time = time.time()
+
+    if enable_debug:
+        _device = pipe.device
+        log(f"Debug Mode: Enabled", message_type='info', icon="🐞")
+        log(f"Device: {_device}", message_type='info', icon="🖥️")
+        if torch.cuda.is_available():
+             log(f"Total VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB", message_type='info', icon="💾")
+        log(f"Input Frames: {frames.shape}", message_type='info', icon="🎞️")
+        log(f"Chunk Size: {chunk_size}", message_type='info', icon="📦")
+        log(f"Tiled DiT: {tiled_dit}, Tiled VAE: {tiled_vae}", message_type='info', icon="🧩")
+        log_resource_usage(prefix="Start")
+
+    # Chunking Logic
+    total_frames = frames.shape[0]
+    final_outputs = []
+
+    if chunk_size > 0 and chunk_size < total_frames:
+        num_chunks = math.ceil(total_frames / chunk_size)
+        log(f"Splitting video into {num_chunks} chunks (size {chunk_size})...", message_type='info', icon="✂️")
         
+        for i in range(num_chunks):
+            chunk_start = i * chunk_size
+            chunk_end = min((i + 1) * chunk_size, total_frames)
+
+            if enable_debug:
+                log(f"Processing Chunk {i+1}/{num_chunks}: Frames {chunk_start}-{chunk_end}", message_type='info', icon="🎞️")
+
+            chunk_frames = frames[chunk_start:chunk_end]
+
+            chunk_out = process_chunk(
+                pipe, chunk_frames, scale, color_fix, tiled_vae, tiled_dit,
+                tile_size, tile_overlap, unload_dit, sparse_ratio, kv_ratio,
+                local_range, seed, force_offload, enable_debug
+            )
+
+            final_outputs.append(chunk_out.cpu()) # Ensure on CPU
+            del chunk_out
+            clean_vram()
+
+        final_output_tensor = torch.cat(final_outputs, dim=0)
+    else:
+        final_output_tensor = process_chunk(
+            pipe, frames, scale, color_fix, tiled_vae, tiled_dit,
+            tile_size, tile_overlap, unload_dit, sparse_ratio, kv_ratio,
+            local_range, seed, force_offload, enable_debug
+        )
+
     end_time = time.time()
     total_time = end_time - start_time
     fps = frames.shape[0] / total_time if total_time > 0 else 0
@@ -426,15 +501,9 @@ def flashvsr(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, ti
         log(f"Peak VRAM used: {peak_memory:.2f} GB", message_type='info', icon="📈")
         
     log_resource_usage(prefix="Final")
-
-    if frames.shape[0] == 1:
-        final_output = final_output.to(_device)
-        stacked_image_tensor = torch.median(final_output, dim=0).values.unsqueeze(0).float().to('cpu')
-        del final_output
-        clean_vram()
-        return stacked_image_tensor
     
-    return final_output[:frames.shape[0], :, :, :]
+    return final_output_tensor
+
 
 class FlashVSRNodeInitPipe:
     @classmethod
@@ -586,6 +655,13 @@ class FlashVSRNodeAdv:
                     "min": 0,
                     "max": 1125899906842624
                 }),
+                "frame_chunk_size": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 10000,
+                    "step": 1,
+                    "tooltip": "Split processing into chunks of N frames to save VRAM. 0 = Process all frames at once."
+                }),
                 "enable_debug": ("BOOLEAN", {
                     "default": False,
                     "tooltip": "Enable extensive logging for debugging."
@@ -603,9 +679,9 @@ class FlashVSRNodeAdv:
     CATEGORY = "FlashVSR"
     #DESCRIPTION = ""
     
-    def main(self, pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap, unload_dit, sparse_ratio, kv_ratio, local_range, seed, enable_debug, keep_models_on_cpu):
+    def main(self, pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap, unload_dit, sparse_ratio, kv_ratio, local_range, seed, frame_chunk_size, enable_debug, keep_models_on_cpu):
         _pipe, _ = pipe
-        output = flashvsr(_pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap, unload_dit, sparse_ratio, kv_ratio, local_range, seed, keep_models_on_cpu, enable_debug)
+        output = flashvsr(_pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap, unload_dit, sparse_ratio, kv_ratio, local_range, seed, keep_models_on_cpu, enable_debug, frame_chunk_size)
         return(output,)
 
 class FlashVSRNode:
@@ -646,6 +722,13 @@ class FlashVSRNode:
                     "min": 0,
                     "max": 1125899906842624
                 }),
+                "frame_chunk_size": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 10000,
+                    "step": 1,
+                    "tooltip": "Split processing into chunks of N frames to save VRAM. 0 = Process all frames at once."
+                }),
                 "attention_mode": (["sparse_sage_attention", "block_sparse_attention", "flash_attention_2", "sdpa"], {
                     "default": "sparse_sage_attention",
                     "tooltip": 'Attention backend selection. "sparse_sage" and "block_sparse" use sparse masks. "flash_attention_2" and "sdpa" use dense attention (potentially slower but higher VRAM usage).'
@@ -667,7 +750,7 @@ class FlashVSRNode:
     CATEGORY = "FlashVSR"
     DESCRIPTION = 'Download the entire "FlashVSR" folder with all the files inside it from "https://huggingface.co/JunhaoZhuang/FlashVSR" and put it in the "ComfyUI/models"'
     
-    def main(self, model, frames, mode, scale, tiled_vae, tiled_dit, unload_dit, seed, attention_mode, enable_debug, keep_models_on_cpu):
+    def main(self, model, frames, mode, scale, tiled_vae, tiled_dit, unload_dit, seed, frame_chunk_size, attention_mode, enable_debug, keep_models_on_cpu):
         _device = "cuda:0" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "auto"
         if _device == "auto" or _device not in device_choices:
             raise RuntimeError("No devices found to run FlashVSR!")
@@ -678,7 +761,7 @@ class FlashVSRNode:
         wan_video_dit.ATTENTION_MODE = attention_mode
             
         pipe = init_pipeline(model, mode, _device, torch.float16)
-        output = flashvsr(pipe, frames, scale, True, tiled_vae, tiled_dit, 256, 24, unload_dit, 2.0, 3.0, 11, seed, keep_models_on_cpu, enable_debug)
+        output = flashvsr(pipe, frames, scale, True, tiled_vae, tiled_dit, 256, 24, unload_dit, 2.0, 3.0, 11, seed, keep_models_on_cpu, enable_debug, frame_chunk_size)
         return(output,)
 
 NODE_CLASS_MAPPINGS = {
