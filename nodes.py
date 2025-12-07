@@ -307,7 +307,7 @@ class cqdm:
     def __len__(self):
         return self.total
 
-def process_chunk(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap, unload_dit, sparse_ratio, kv_ratio, local_range, seed, force_offload, enable_debug):
+def process_chunk(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, tile_overlap, unload_dit, sparse_ratio, kv_ratio, local_range, seed, force_offload, enable_debug, is_single_frame_input=False):
     """
     Processes a single chunk of frames.
     """
@@ -416,7 +416,7 @@ def process_chunk(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_siz
         del video, LQ
         clean_vram()
 
-    if frames.shape[0] == 1:
+    if is_single_frame_input and frames.shape[0] == 1:
         # Special handling for single frame if needed, but tensor2video returns [F, H, W, C]
         # logic below seems to handle temporal median if 1 frame? No, wait.
         # If frames.shape[0] == 1, `final_output` is [F_out, H, W, C]. F_out corresponds to padded/processed.
@@ -459,6 +459,8 @@ def flashvsr(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, ti
     total_frames = frames.shape[0]
     final_outputs = []
 
+    is_single_frame_input = (frames.shape[0] == 1)
+
     if chunk_size > 0 and chunk_size < total_frames:
         num_chunks = math.ceil(total_frames / chunk_size)
         log(f"Splitting video into {num_chunks} chunks (size {chunk_size})...", message_type='info', icon="✂️")
@@ -475,7 +477,8 @@ def flashvsr(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, ti
             chunk_out = process_chunk(
                 pipe, chunk_frames, scale, color_fix, tiled_vae, tiled_dit,
                 tile_size, tile_overlap, unload_dit, sparse_ratio, kv_ratio,
-                local_range, seed, force_offload, enable_debug
+                local_range, seed, force_offload, enable_debug,
+                is_single_frame_input=is_single_frame_input
             )
 
             final_outputs.append(chunk_out.cpu()) # Ensure on CPU
@@ -487,7 +490,8 @@ def flashvsr(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_size, ti
         final_output_tensor = process_chunk(
             pipe, frames, scale, color_fix, tiled_vae, tiled_dit,
             tile_size, tile_overlap, unload_dit, sparse_ratio, kv_ratio,
-            local_range, seed, force_offload, enable_debug
+            local_range, seed, force_offload, enable_debug,
+            is_single_frame_input=is_single_frame_input
         )
 
     end_time = time.time()

@@ -3,13 +3,16 @@ Running FlashVSR on lower VRAM without any artifacts.
 
 ## Changelog
 
-#### 2025-12-07
+#### 07.12.2025
+- **Bug Fix**: Fixed the progress bar to correctly display status in ComfyUI using the `cqdm` wrapper.
+- **New Feature**: Added `frame_chunk_size` option to split large videos into chunks, enabling processing of large files on limited VRAM by offloading to CPU.
+- **Enhancement**: Improved logging to show detailed resource usage (RAM, Peak VRAM, per-step timing) when `enable_debug` is active.
 - **Optimization**: Added `torch.cuda.ipc_collect()` for better memory cleanup.
 - **New Feature**: Added `attention_mode` selection with support for `flash_attention_2`, `sdpa`, `sparse_sage`, and `block_sparse` backends.
 - **New Feature**: Implemented VAE spatial tiling to reduce VRAM usage during decoding (experimental).
 - **Refactor**: Cleaned up code and improved error handling for imports.
 
-#### 2025-12-06
+#### 06.12.2025
 - **Bug Fix**: Fixed a shape mismatch error for small input frames by implementing correct padding logic.
 - **Optimization**: VRAM is now immediately freed at the start of processing to prevent OOM errors.
 - **New Feature**: Added `enable_debug` option for extensive logging (input shapes, tile stats, VRAM usage, processing time).
@@ -18,14 +21,14 @@ Running FlashVSR on lower VRAM without any artifacts.
 - **Optimization**: Replaced `einops` operations with native PyTorch ops for potential performance gains.
 - **Optimization**: Added "Conv3d memory workaround" for improved compatibility with newer PyTorch versions.
 
-#### 2025-10-24
+#### 24.10.2025
 - Added long video pipeline that significantly reduces VRAM usage when upscaling long videos.
 
-#### 2025-10-22
+#### 22.10.2025
 - Replaced `Block-Sparse-Attention` with `Sparse_Sage`, removing the need to compile any custom kernels.  
 - Added support for running on RTX 50 series GPUs.
 
-#### 2025-10-21
+#### 21.10.2025
 - Initial release of this project, introducing features such as `tile_dit` to significantly reduce VRAM usage.
 
 ## Preview
@@ -46,6 +49,8 @@ Significantly reduces VRAM usage at the cost of speed.
 How to split the input video.  
 - **unload_dit:**  
 Unload DiT before decoding to reduce VRAM peak at the cost of speed.  
+- **frame_chunk_size**:
+Split processing into chunks of N frames to save VRAM. 0 = Process all frames at once.
 - **enable_debug:**  
 Enable extensive logging for debugging purposes. Displays detailed information about device status, input dimensions, and per-tile processing statistics.
 - **keep_models_on_cpu:**  
