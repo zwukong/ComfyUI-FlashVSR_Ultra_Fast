@@ -45,7 +45,7 @@ Running FlashVSR on lower VRAM without any artifacts.
 - Initial release of this project.
 
 ## Preview
-![](./workflow/image.png)
+![](./workflow/image1.png)
 
 ## Sample Workflow
 [Download Workflow JSON](./workflow/FlashVSR.json)
