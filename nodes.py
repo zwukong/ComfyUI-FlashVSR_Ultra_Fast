@@ -346,13 +346,17 @@ def process_chunk(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_siz
             if not isinstance(pipe, FlashVSRTinyLongPipeline):
                 LQ_tile = LQ_tile.to(_device)
                 
-            output_tile_gpu = pipe(
-                prompt="", negative_prompt="", cfg_scale=1.0, num_inference_steps=1, seed=seed, tiled=tiled_vae,
-                LQ_video=LQ_tile, num_frames=F, height=th, width=tw, is_full_block=False, if_buffer=True,
-                topk_ratio=sparse_ratio*768*1280/(th*tw), kv_ratio=kv_ratio, local_range=local_range,
-                color_fix=color_fix, unload_dit=unload_dit, force_offload=force_offload,
-                enable_debug_logging=enable_debug # Pass debug flag if supported by pipe, though pipe def signature might need update or we handle it via cqdm wrapping inside
-            )
+            try:
+                output_tile_gpu = pipe(
+                    prompt="", negative_prompt="", cfg_scale=1.0, num_inference_steps=1, seed=seed, tiled=tiled_vae,
+                    LQ_video=LQ_tile, num_frames=F, height=th, width=tw, is_full_block=False, if_buffer=True,
+                    topk_ratio=sparse_ratio*768*1280/(th*tw), kv_ratio=kv_ratio, local_range=local_range,
+                    color_fix=color_fix, unload_dit=unload_dit, force_offload=force_offload,
+                    enable_debug_logging=enable_debug # Pass debug flag if supported by pipe
+                )
+            except torch.OutOfMemoryError as e:
+                log(f"OOM during Tiled Processing! Try reducing tile_size or enabling tiled_vae if not enabled.", message_type='error', icon="❌")
+                raise e
             
             processed_tile_cpu = tensor2video(output_tile_gpu).to("cpu")
             
@@ -400,12 +404,18 @@ def process_chunk(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_siz
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs, enable_debug=enable_debug)
 
-        video = pipe(
-            prompt="", negative_prompt="", cfg_scale=1.0, num_inference_steps=1, seed=seed, tiled=tiled_vae,
-            progress_bar_cmd=cqdm_debug, LQ_video=LQ, num_frames=F, height=th, width=tw, is_full_block=False, if_buffer=True,
-            topk_ratio=sparse_ratio*768*1280/(th*tw), kv_ratio=kv_ratio, local_range=local_range,
-            color_fix = color_fix, unload_dit=unload_dit, force_offload=force_offload
-        )
+        try:
+            video = pipe(
+                prompt="", negative_prompt="", cfg_scale=1.0, num_inference_steps=1, seed=seed, tiled=tiled_vae,
+                progress_bar_cmd=cqdm_debug, LQ_video=LQ, num_frames=F, height=th, width=tw, is_full_block=False, if_buffer=True,
+                topk_ratio=sparse_ratio*768*1280/(th*tw), kv_ratio=kv_ratio, local_range=local_range,
+                color_fix = color_fix, unload_dit=unload_dit, force_offload=force_offload
+            )
+        except torch.OutOfMemoryError as e:
+            log(f"OOM during Processing! Try reducing frame_chunk_size (current: {frames.shape[0]}) or enabling tiled_vae / tiled_dit.", message_type='error', icon="❌")
+            clean_vram()
+            raise e
+
         process_end = time.time()
         
         if enable_debug:
