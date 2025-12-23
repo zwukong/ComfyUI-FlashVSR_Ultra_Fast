@@ -9,91 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.2.0] - 2025-12-23
 
-### 🚀 New Features
+### ✨ New Features
 
-#### Pre-Flight Resource Calculator (FIX 9)
-- **Intelligent VRAM Estimation**: Calculates approximate VRAM requirements before processing begins.
-- **Hardware Detection**: Uses `torch.cuda.mem_get_info()` for accurate real-time VRAM/RAM availability.
-- **Settings Recommender**: If OOM is predicted, automatically suggests optimal settings:
-  - Recommended `chunk_size` based on available memory
-  - Recommended `resize_factor` for constrained systems  
-  - Automatic tiling enablement suggestions
-- **Console Output**: Clear pre-flight status with actionable recommendations.
-
-#### 5 VAE Model Options (FIX 1 & 7)
-- **Unified `vae_model` Dropdown**: Single input replacing redundant `vae_type` and `alt_vae` fields.
-- **Five VAE Options**:
-
-| Selection | File | Architecture | Use Case |
-|-----------|------|--------------|----------|
-| Wan2.1 | Wan2.1_VAE.pth | WanVideoVAE | Original baseline, maximum compatibility |
-| Wan2.2 | Wan2.2_VAE.pth | Wan22VideoVAE | Updated normalization for Wan2.2 regime |
-| LightVAE_W2.1 | lightvaew2_1.pth | LightX2VVAE | ~50% VRAM reduction, 2-3x faster |
-| TAE_W2.2 | taew2_2.safetensors | TAEW22VAE | Temporal autoencoder for Wan2.2 |
-| LightTAE_HY1.5 | lighttaehy1_5.pth | LightTAEHY15VAE | HunyuanVideo compatible |
-
-#### Auto-Download System (FIX 6)
-- **Automatic Model Downloads**: VAE files auto-download from HuggingFace if missing.
-- **Primary Source**: Uses `hf_hub_download()` from HuggingFace Hub.
-- **Fallback**: Falls back to `torch.hub.download_url_to_file()` if HF Hub fails.
-- **Repository**: All models sourced from `huggingface.co/lightx2v/Autoencoders`.
-
-#### Unified Processing Pipeline (FIX 10)
-- **Shared Optimizations**: All modes (`full`, `tiny`, `tiny-long`) now use the same optimized pipeline.
-- **Consistent OOM Handling**: Robust memory management applied globally.
-- **Mode-Adaptive**: Pipeline adapts behavior based on selected mode while sharing core logic.
+- **5 New VAE Models**: Added support for `Wan2.2`, `LightVAE_W2.1`, `TAE_W2.2`, `LightTAE_HY1.5` (plus original `Wan2.1`).
+- **Smart Resource Calculator**: Added "Pre-flight" check to analyze VRAM/RAM usage and recommend optimal settings before processing.
+- **Auto-Download**: Added automatic downloading for missing VAE models from HuggingFace (`lightx2v/Autoencoders` repository).
+- **Unified UI**: Replaced complex `vae_type` and `alt_vae` inputs with a single `vae_model` dropdown.
 
 ### 🐛 Bug Fixes
 
-#### Video Corruption Fix (FIX 7)
-- **Root Cause**: Incorrect tensor permutation during VAE decode caused glitchy/broken output.
-- **Solution**: Rewrote `tensor2video()` to properly handle all tensor formats:
-  - (B, C, F, H, W) - Batch, Channels, Frames, Height, Width
-  - (C, F, H, W) - Channels, Frames, Height, Width
-  - (F, C, H, W) - Frames, Channels, Height, Width
-- **Validation**: Added `torch.clamp(0.0, 1.0)` to ensure valid output range.
+- **Fixed Black Borders**: Implemented correct "Padding → Process → Crop" logic to handle VAE dimension requirements without corrupting the output.
+- **Fixed Video Glitches**: Corrected Tensor Permutation logic (`B,C,F,H,W` vs `B,H,W,C`) to prevent visual artifacts.
+- **Fixed Model Loading**: Solved the issue where selecting "Wan2.2" incorrectly loaded "Wan2.1_VAE.pth".
+- **Fixed OOM False Positive**: OOM recovery no longer triggers prematurely (adjusted threshold to 95%).
 
-#### Black Border Fix (FIX 3)
-- **Root Cause**: Padding applied for VAE alignment (divisible by 8/16) was not being cropped correctly.
-- **Strict Algorithm**:
-  1. Store `original_sH`, `original_sW` before padding.
-  2. Apply `reflect` padding (with `replicate` fallback for small images).
-  3. Process through VAE decode.
-  4. **CRITICAL**: Crop output back to original dimensions ONLY AFTER decode is 100% complete.
-- **Result**: No more black borders on output video.
+### ⚡ Optimization
 
-#### Model Loading Logic Bug (FIX 2)
-- **Problem**: Users selecting "LightX2V" saw logs loading "Wan2.1_VAE.pth" instead.
-- **Solution**: Implemented STRICT file path mapping with explicit class instantiation.
-- **Debug Logging**: Added `selected_model` vs `loaded_model_path` logging for verification.
-
-#### OOM False Positive Fix (FIX 5)
-- **Problem**: OOM recovery triggered prematurely, leaving VRAM unused.
-- **Solution**: Adjusted VRAM threshold to 95% using `torch.cuda.mem_get_info()`.
-- **Target**: Optimized for RTX 5070 Ti and similar 16GB cards.
-
-### ⚡ Performance Improvements
-
-#### VRAM Optimization (FIX 5)
-- **95% VRAM Threshold**: OOM recovery only triggers at 95% VRAM usage.
-- **Aggressive Garbage Collection**: `torch.cuda.empty_cache()` before/after heavy operations.
-- **Memory Profiling**: Enhanced `estimate_vram_usage()` considers mode, chunk_size, and tiling.
-
-#### Lossless Resize (FIX 4)
-- **Integer Scaling**: Uses `NEAREST` interpolation for clean integer scaling (0.5, 0.25, etc.).
-- **Non-Integer Scaling**: Uses `BICUBIC` for fractional factors.
-- **Logging**: Reports which interpolation method is used.
+- **Unified Pipeline**: Merged `tiny`, `full`, and `tiny-long` logic into a single optimized architecture.
+- **OOM Protection**: Improved memory management with 95% VRAM threshold using `torch.cuda.mem_get_info()`.
+- **Lossless Resize**: Uses `NEAREST` interpolation for integer scaling (0.5, 0.25) to avoid blur.
+- **Aggressive Garbage Collection**: Added `torch.cuda.empty_cache()` before/after heavy VAE operations.
 
 ### 🛠 Refactoring
 
-#### Code Structure
-- **Explicit VAE Instantiation (FIX 7)**: No more state_dict inspection/guessing for model type.
-- **VAE_MODEL_MAP**: Centralized configuration for all 5 VAE options with class, file, URL, dimensions.
-- **Summary Logging (FIX 8)**: End-of-processing report with total time, peak VRAM, resolutions.
+- **Explicit VAE Instantiation**: No more state_dict inspection/guessing - strict class mapping based on user selection.
+- **VAE_MODEL_MAP**: Centralized configuration for all 5 VAE options (class, file, URL, dimensions).
+- **Summary Logging**: End-of-processing report with total time, peak VRAM, and resolutions.
+- **Debug Logging**: Shows `selected_model` vs `loaded_model_path` for verification.
 
-#### Documentation
-- **Inline Comments**: Verbose comments marking each FIX location in code.
-- **Docstrings**: Comprehensive docstrings for tensor handling functions.
+### 📖 Documentation
+
+- Updated README with VAE Selection Guide and VRAM tier recommendations.
+- Added Best Practices section for Low/Medium/High VRAM configurations.
+- Added Pre-Flight Resource Check documentation with example output.
+- Added direct download links for all 5 VAE models.
 
 ---
 

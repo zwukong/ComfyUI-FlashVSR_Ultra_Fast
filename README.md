@@ -26,11 +26,7 @@ Run FlashVSR on 8GB-24GB+ GPUs without artifacts. Features intelligent resource 
 - [Sample Workflow](./workflow/FlashVSR.json)
 - [HuggingFace Models](https://huggingface.co/JunhaoZhuang/FlashVSR)
 
-## Preview
-![](./workflow/image1.png)
-
-## Sample Workflow
-[Download Workflow JSON](./workflow/FlashVSR.json)
+---
 
 ## Performance & VRAM Optimization
 
