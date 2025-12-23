@@ -171,7 +171,24 @@ def estimate_vram_usage(width, height, num_frames, scale, tiled_vae=False, tiled
     """
     Estimate approximate VRAM usage for the given video parameters.
     Returns estimated VRAM in GB. Enhanced to consider chunk_size and mode.
+    
+    =============================================================================
+    FIX: Accurate VRAM Estimation with Safety Factor
+    =============================================================================
+    Previous estimates were ~4.5GB when actual usage was ~15GB.
+    This was because we ignored:
+    - Intermediate Activations: PyTorch stores outputs for every layer
+    - VAE Upscaling: VAE decoding expands data significantly  
+    - Workspace Memory: CUDA context overhead
+    
+    Solution: Apply Safety_Factor = 4.0 to the raw tensor calculations
+    to account for these overheads.
     """
+    # Safety factor to account for intermediate activations, VAE upscaling overhead,
+    # and CUDA workspace memory. Empirically determined from observed ~15GB actual
+    # usage when estimates were ~4.5GB.
+    SAFETY_FACTOR = 4.0
+    
     # Base model memory varies by mode
     if mode == "full":
         base_model_gb = 5.0  # Full VAE + DiT
@@ -189,16 +206,21 @@ def estimate_vram_usage(width, height, num_frames, scale, tiled_vae=False, tiled
     # Frames to process at once (if chunked, use chunk_size)
     effective_frames = chunk_size if chunk_size > 0 and chunk_size <= num_frames else num_frames
     
+    # Input tensor size (4 bytes per float32, though we use bf16/fp16)
+    # Formula: (Input_Tensor_Size * 4 bytes) * Safety_Factor
+    input_tensor_bytes = output_h * output_w * 3 * effective_frames * 4  # 4 bytes for float32
+    input_tensor_gb = (input_tensor_bytes * SAFETY_FACTOR) / (1024 ** 3)
+    
     # Approximate memory per frame in latent space (16 channels, bf16)
     bytes_per_frame = latent_h * latent_w * 16 * 2  # bf16 = 2 bytes
-    total_latent_gb = (bytes_per_frame * effective_frames) / (1024 ** 3)
+    total_latent_gb = (bytes_per_frame * effective_frames * SAFETY_FACTOR) / (1024 ** 3)
     
     # DiT attention memory (quadratic with sequence length)
     seq_len = latent_h * latent_w * (effective_frames // 4)
-    attention_gb = (seq_len * seq_len * 2) / (1024 ** 3) * 0.001  # Rough estimate
+    attention_gb = (seq_len * seq_len * 2 * SAFETY_FACTOR) / (1024 ** 3) * 0.001  # Rough estimate
     
-    # VAE decode memory
-    vae_decode_gb = (output_h * output_w * 3 * effective_frames * 2) / (1024 ** 3)
+    # VAE decode memory - this is where most intermediate activations live
+    vae_decode_gb = (output_h * output_w * 3 * effective_frames * 2 * SAFETY_FACTOR) / (1024 ** 3)
     
     # Apply tiling reductions
     if tiled_dit:
@@ -206,7 +228,7 @@ def estimate_vram_usage(width, height, num_frames, scale, tiled_vae=False, tiled
     if tiled_vae:
         vae_decode_gb *= 0.4  # Tiling reduces peak VAE memory
     
-    total_estimated = base_model_gb + total_latent_gb + attention_gb + vae_decode_gb
+    total_estimated = base_model_gb + input_tensor_gb + total_latent_gb + attention_gb + vae_decode_gb
     return total_estimated
 
 
