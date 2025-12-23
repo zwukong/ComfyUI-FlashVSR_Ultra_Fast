@@ -1036,7 +1036,8 @@ def process_chunk(pipe, frames, scale, color_fix, tiled_vae, tiled_dit, tile_siz
             prompt="", negative_prompt="", cfg_scale=1.0, num_inference_steps=1, seed=seed, tiled=tiled_vae,
             progress_bar_cmd=cqdm_debug, LQ_video=LQ, num_frames=F, height=th, width=tw, is_full_block=False, if_buffer=True,
             topk_ratio=sparse_ratio*768*1280/(th*tw), kv_ratio=kv_ratio, local_range=local_range,
-            color_fix = color_fix, unload_dit=unload_dit, force_offload=force_offload
+            color_fix = color_fix, unload_dit=unload_dit, force_offload=force_offload,
+            enable_debug_logging=enable_debug
         )
 
         process_end = time.time()
