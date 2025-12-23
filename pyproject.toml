@@ -1,0 +1,40 @@
+[project]
+name = "ComfyUI-FlashVSR_Stable"
+description = "ComfyUI-FlashVSR_Stable official ComfyUI integration: High-performance Video Super Resolution for ComfyUI with VRAM optimization."
+version = "1.2.1"
+authors = [
+    {name = "naxci1"},
+    
+]
+license = {file = "LICENSE"} 
+classifiers = [
+     "Operating System :: OS Independent"
+]
+dependencies = [
+	"torch",
+	"torchvision",
+	"numpy",
+	"einops",
+	"safetensors",
+	"tqdm",
+	"pillow",
+	"huggingface_hub",
+	"triton; platform_system!="Windows"",
+	"triton-windows; platform_system=="Windows"",
+	"sageattention",
+	"flash-attn --no-build-isolation; platform_system!="Windows"",
+	"psutil"
+
+]
+
+[project.urls]
+Repository = "https://github.com/naxci1/ComfyUI-FlashVSR_Stable"
+Documentation = "https://github.com/naxci1/ComfyUI-FlashVSR_Stable/blob/main/CHANGELOG.md"
+"Bug Tracker" = "https://github.com/naxci1/ComfyUI-FlashVSR_Stable/issues"
+Forum = "https://github.com/naxci1/ComfyUI-FlashVSR_Stable/discussions"
+
+[tool.comfy]
+PublisherId = "naxci1"
+DisplayName = "ComfyUI-FlashVSR_Stable"
+Icon = "https://github.com/naxci1/ComfyUI-FlashVSR_Stable/blob/main/workflow/logo_tr.png"
+includes = []
