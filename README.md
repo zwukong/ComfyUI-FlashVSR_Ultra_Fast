@@ -186,6 +186,7 @@ Hover over any input in ComfyUI to see tooltips. Full parameter list:
 | **frame_chunk_size** | Process N frames at a time. 0 = all. |
 | **enable_debug** | Verbose console logging. |
 | **keep_models_on_cpu** | Offload to system RAM when idle. |
+| **resize_factor** | To first reduce the size of large videos and then enlarge them, use a range of (0.3-1.0). |
 | **attention_mode** | Attention kernel: `sparse_sage`, `flash_attention_2`, `sdpa`, `block_sparse` |
 
 ---
