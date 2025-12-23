@@ -7,10 +7,12 @@ Supports Wan2.1, Wan2.2, and LightX2V VAE models.
 
 Key Fixes Applied:
 - FIX 1: Merged VAE selection into single 'vae_model' dropdown
-- FIX 2: Corrected VAE model loading logic with debug logging
+- FIX 2: Corrected VAE model loading logic with DISTINCT file paths per model
 - FIX 3: Fixed black border issue with proper padding/cropping
 - FIX 4: Lossless resize uses NEAREST for integer scaling
 - FIX 5: VRAM estimation and advisory logging
+- FIX 6: Auto-download for missing VAE models
+- FIX 7: Fixed tensor permutation for correct video output
 """
 
 import os, gc
@@ -26,7 +28,7 @@ import numpy as np
 import torch.nn.functional as F
 
 from einops import rearrange
-from huggingface_hub import snapshot_download
+from huggingface_hub import snapshot_download, hf_hub_download
 try:
     from .src import ModelManager, FlashVSRFullPipeline, FlashVSRTinyPipeline, FlashVSRTinyLongPipeline
     from .src.models.TCDecoder import build_tcdecoder
@@ -57,11 +59,39 @@ except ImportError:
 # =============================================================================
 VAE_MODEL_OPTIONS = ["Wan2.1", "Wan2.2", "LightX2V"]
 
-# Mapping from dropdown selection to internal VAE class and file
+# =============================================================================
+# FIX 2 (CRITICAL): Distinct file paths for each VAE model
+# Each VAE selection MUST load a DIFFERENT file
+# =============================================================================
 VAE_MODEL_MAP = {
-    "Wan2.1": {"class": WanVideoVAE, "file": "Wan2.1_VAE.pth", "internal_name": "wan2.1"},
-    "Wan2.2": {"class": Wan22VideoVAE, "file": "Wan2.1_VAE.pth", "internal_name": "wan2.2"},  # Uses same weights, different normalization
-    "LightX2V": {"class": LightX2VVAE, "file": "Wan2.1_VAE.pth", "internal_name": "lightx2v"},  # Compatible with Wan2.1 weights
+    "Wan2.1": {
+        "class": WanVideoVAE, 
+        "file": "Wan2.1_VAE.pth", 
+        "internal_name": "wan2.1",
+        "hf_repo": "Wan-AI/Wan2.1-T2V-1.3B",
+        "hf_filename": "Wan2.1_VAE.pth"
+    },
+    "Wan2.2": {
+        "class": Wan22VideoVAE, 
+        "file": "Wan2.2_VAE.pth",  # DISTINCT file for Wan2.2
+        "internal_name": "wan2.2",
+        "hf_repo": "Wan-AI/Wan2.2-T2V-1.3B",
+        "hf_filename": "Wan2.2_VAE.pth"
+    },
+    "LightX2V": {
+        "class": LightX2VVAE, 
+        "file": "lightvaew2_1.pth",  # DISTINCT file for LightX2V
+        "internal_name": "lightx2v",
+        "hf_repo": "lightx2v/Autoencoders",
+        "hf_filename": "lightvaew2_1.pth"
+    },
+}
+
+# Fallback URLs (placeholder - update with actual URLs when available)
+VAE_DOWNLOAD_URLS = {
+    "Wan2.1_VAE.pth": "https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B/resolve/main/Wan2.1_VAE.pth",
+    "Wan2.2_VAE.pth": "https://huggingface.co/Wan-AI/Wan2.2-T2V-1.3B/resolve/main/Wan2.2_VAE.pth",
+    "lightvaew2_1.pth": "https://huggingface.co/lightx2v/Autoencoders/resolve/main/lightvaew2_1.pth",
 }
 
 device_choices = get_device_list()
@@ -175,9 +205,105 @@ def model_download(model_name="JunhaoZhuang/FlashVSR"):
         log(f"Downloading model '{model_name}' from huggingface...", message_type='info', icon="⬇️")
         snapshot_download(repo_id=model_name, local_dir=model_dir, local_dir_use_symlinks=False, resume_download=True)
 
+
+# =============================================================================
+# FIX 6: Auto-download VAE models if missing
+# =============================================================================
+def download_vae_if_missing(vae_file: str, model_path: str, vae_config: dict) -> str:
+    """
+    Check if VAE file exists. If not, attempt to download it.
+    
+    Args:
+        vae_file: The filename of the VAE (e.g., 'Wan2.1_VAE.pth')
+        model_path: The directory where VAE should be saved
+        vae_config: The VAE configuration from VAE_MODEL_MAP
+    
+    Returns:
+        Full path to the VAE file
+    """
+    vae_path = os.path.join(model_path, vae_file)
+    
+    if os.path.exists(vae_path):
+        log(f"VAE file found: {vae_file}", message_type='info', icon="✅")
+        return vae_path
+    
+    log(f"VAE file '{vae_file}' not found. Attempting auto-download...", message_type='warning', icon="⬇️")
+    
+    # Try HuggingFace Hub download first
+    hf_repo = vae_config.get("hf_repo")
+    hf_filename = vae_config.get("hf_filename")
+    
+    if hf_repo and hf_filename:
+        try:
+            log(f"Downloading from HuggingFace: {hf_repo}/{hf_filename}", message_type='info', icon="🌐")
+            downloaded_path = hf_hub_download(
+                repo_id=hf_repo,
+                filename=hf_filename,
+                local_dir=model_path,
+                local_dir_use_symlinks=False
+            )
+            # Move to expected location if needed
+            if os.path.exists(downloaded_path) and downloaded_path != vae_path:
+                import shutil
+                shutil.move(downloaded_path, vae_path)
+            log(f"Successfully downloaded VAE: {vae_file}", message_type='finish', icon="✅")
+            return vae_path
+        except Exception as e:
+            log(f"HuggingFace download failed: {e}", message_type='warning', icon="⚠️")
+    
+    # Fallback to direct URL download
+    if vae_file in VAE_DOWNLOAD_URLS:
+        try:
+            url = VAE_DOWNLOAD_URLS[vae_file]
+            log(f"Downloading from URL: {url}", message_type='info', icon="🌐")
+            torch.hub.download_url_to_file(url, vae_path, progress=True)
+            log(f"Successfully downloaded VAE: {vae_file}", message_type='finish', icon="✅")
+            return vae_path
+        except Exception as e:
+            log(f"URL download failed: {e}", message_type='error', icon="❌")
+    
+    raise RuntimeError(
+        f'VAE file "{vae_file}" not found and auto-download failed.\n'
+        f'Please manually download it and save to: {vae_path}\n'
+        f'Expected HuggingFace source: {hf_repo}'
+    )
+
+
+# =============================================================================
+# FIX 7: Fixed tensor2video for correct video output
+# Ensures proper tensor permutation: VAE output (B, C, F, H, W) -> video (F, H, W, C)
+# =============================================================================
 def tensor2video(frames: torch.Tensor):
-    video_squeezed = frames.squeeze(0)
-    video_permuted = video_squeezed.permute(1, 2, 3, 0) # C F H W -> F H W C
+    """
+    Convert VAE output tensor to video format.
+    
+    Input: (B, C, F, H, W) - Batch, Channels, Frames, Height, Width (VAE output)
+    Output: (F, H, W, C) - Frames, Height, Width, Channels (video format)
+    
+    The tensor is normalized from [-1, 1] to [0, 1] for display.
+    """
+    # Handle different input shapes
+    if frames.dim() == 5:
+        # Expected shape: (B, C, F, H, W)
+        video_squeezed = frames.squeeze(0)  # (C, F, H, W)
+        video_permuted = video_squeezed.permute(1, 2, 3, 0)  # (F, H, W, C)
+    elif frames.dim() == 4:
+        # Shape: (C, F, H, W) or (F, C, H, W) - need to detect
+        if frames.shape[0] == 3 or frames.shape[0] == 4:
+            # Likely (C, F, H, W)
+            video_permuted = frames.permute(1, 2, 3, 0)  # (F, H, W, C)
+        else:
+            # Likely (F, C, H, W)
+            video_permuted = frames.permute(0, 2, 3, 1)  # (F, H, W, C)
+    else:
+        raise ValueError(f"Unexpected tensor shape: {frames.shape}")
+    
+    # Normalize from [-1, 1] to [0, 1]
+    video_final = (video_permuted.float() + 1.0) / 2.0
+    # Clamp to valid range
+    video_final = torch.clamp(video_final, 0.0, 1.0)
+    
+    return video_final
     video_final = (video_permuted.float() + 1.0) / 2.0
     return video_final
 
@@ -328,11 +454,16 @@ def init_pipeline(model, mode, device, dtype, vae_model="Wan2.1"):
     Initialize FlashVSR pipeline with specified model and VAE type.
     
     =============================================================================
-    FIX 2: Model Loading Logic - Corrected VAE selection
+    FIX 2: Model Loading Logic - STRICT VAE file path mapping
     =============================================================================
     - vae_model: Unified VAE selection from dropdown ("Wan2.1", "Wan2.2", "LightX2V")
-    - Uses VAE_MODEL_MAP to map selection to correct class and file
+    - Each VAE selection loads a DISTINCT file (no file reuse)
     - Debug logging shows selected_model vs loaded_model for verification
+    
+    File Mapping:
+    - "Wan2.1" -> Wan2.1_VAE.pth
+    - "Wan2.2" -> Wan2.2_VAE.pth  
+    - "LightX2V" -> lightvaew2_1.pth
     """
     model_download(model_name="JunhaoZhuang/"+model)
     model_path = os.path.join(folder_paths.models_dir, model)
@@ -343,7 +474,7 @@ def init_pipeline(model, mode, device, dtype, vae_model="Wan2.1"):
         raise RuntimeError(f'"diffusion_pytorch_model_streaming_dmd.safetensors" does not exist!\nPlease save it to "{model_path}"')
     
     # ==========================================================================
-    # FIX 2: VAE Model Loading - Get correct VAE config from map
+    # FIX 2: VAE Model Loading - STRICT file path mapping (no reuse!)
     # ==========================================================================
     if vae_model not in VAE_MODEL_MAP:
         log(f"Unknown VAE model '{vae_model}', defaulting to Wan2.1", message_type='warning', icon="⚠️")
@@ -354,13 +485,17 @@ def init_pipeline(model, mode, device, dtype, vae_model="Wan2.1"):
     vae_file = vae_config["file"]
     vae_internal_name = vae_config["internal_name"]
     
-    vae_path = os.path.join(model_path, vae_file)
-    if not os.path.exists(vae_path):
-        raise RuntimeError(f'VAE file "{vae_file}" does not exist!\nPlease save it to "{model_path}"')
-    
-    # Debug logging for FIX 2 - Show selected vs loaded
-    log(f"VAE Selection: '{vae_model}' -> Loading '{vae_file}' with class {vae_class.__name__}", 
+    # Debug logging - Show EXACTLY which file will be loaded
+    log(f"VAE Selection: '{vae_model}' -> Loading DISTINCT file '{vae_file}'", 
         message_type='info', icon="🔍")
+    
+    # ==========================================================================
+    # FIX 6: Auto-download VAE if missing
+    # ==========================================================================
+    vae_path = download_vae_if_missing(vae_file, model_path, vae_config)
+    
+    log(f"VAE file path confirmed: {vae_path}", message_type='info', icon="📁")
+    log(f"VAE class to instantiate: {vae_class.__name__}", message_type='info', icon="🔧")
     
     lq_path = os.path.join(model_path, "LQ_proj_in.ckpt")
     if not os.path.exists(lq_path):

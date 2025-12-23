@@ -44,7 +44,7 @@ class TestFlashVSRNodes(unittest.TestCase):
         self.assertEqual(len(VAE_MODEL_OPTIONS), 3)
     
     def test_vae_model_map_configured(self):
-        """Test that VAE_MODEL_MAP is correctly configured."""
+        """Test that VAE_MODEL_MAP is correctly configured with DISTINCT files."""
         self.assertIn("Wan2.1", VAE_MODEL_MAP)
         self.assertIn("Wan2.2", VAE_MODEL_MAP)
         self.assertIn("LightX2V", VAE_MODEL_MAP)
@@ -54,6 +54,17 @@ class TestFlashVSRNodes(unittest.TestCase):
             self.assertIn("class", value)
             self.assertIn("file", value)
             self.assertIn("internal_name", value)
+            self.assertIn("hf_repo", value)  # New: HF repo for auto-download
+            self.assertIn("hf_filename", value)  # New: HF filename
+        
+        # CRITICAL: Verify DISTINCT file paths (no reuse)
+        files = [VAE_MODEL_MAP[k]["file"] for k in VAE_MODEL_MAP]
+        self.assertEqual(len(files), len(set(files)), "VAE files must be DISTINCT - no reuse!")
+        
+        # Verify specific file mappings
+        self.assertEqual(VAE_MODEL_MAP["Wan2.1"]["file"], "Wan2.1_VAE.pth")
+        self.assertEqual(VAE_MODEL_MAP["Wan2.2"]["file"], "Wan2.2_VAE.pth")
+        self.assertEqual(VAE_MODEL_MAP["LightX2V"]["file"], "lightvaew2_1.pth")
 
     def test_vae_model_in_node_input_types(self):
         """Test that vae_model parameter is present in node INPUT_TYPES."""
