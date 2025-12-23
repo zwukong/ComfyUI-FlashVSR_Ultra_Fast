@@ -329,6 +329,7 @@ class FlashVSRTinyLongPipeline(BasePipeline):
         color_fix = True,
         unload_dit = False,
         force_offload = False,
+        enable_debug_logging = False,
     ):
         # 只接受 cfg=1.0（与原代码一致）
         assert cfg_scale == 1.0, "cfg_scale must be 1.0"
