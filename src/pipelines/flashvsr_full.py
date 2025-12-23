@@ -152,12 +152,21 @@ class TorchColorCorrectorWavelet(nn.Module):
 # 简化版 Pipeline（仅 dit + vae）
 # -----------------------------
 class FlashVSRFullPipeline(BasePipeline):
+    """
+    FlashVSR Full Pipeline - Uses TCDecoder with LQ conditioning for high-quality decode.
+    
+    This follows the official FlashVSR implementation which uses TCDecoder (Tiny Conditional 
+    Decoder) for fast reconstruction with low-quality guidance. The key is that the decoder
+    receives the LQ frames as conditioning during decode, which is critical for proper
+    video super-resolution.
+    """
 
     def __init__(self, device="cuda", torch_dtype=torch.float16):
         super().__init__(device=device, torch_dtype=torch_dtype)
         self.scheduler = FlowMatchScheduler(shift=5, sigma_min=0.0, extra_one_step=True)
         self.dit: WanModel = None
         self.vae: WanVideoVAE = None
+        self.TCDecoder = None  # TCDecoder for decode with LQ conditioning
         self.model_names = ['dit', 'vae']
         self.height_division_factor = 16
         self.width_division_factor = 16
@@ -167,10 +176,10 @@ class FlashVSRFullPipeline(BasePipeline):
 
         print(r"""
  ███████╗██╗      █████╗ ███████╗██╗  ██╗██╗   ██╗███████╗█████╗
- ██╔════╝██║     ██╔══██╗██╔════╝██║  ██║██║   ██║██╔════╝██╔══██╗   ██╗
- █████╗  ██║     ███████║███████╗███████║╚██╗ ██╔╝███████╗███████║ ██████╗
- ██╔══╝  ██║     ██╔══██║╚════██║██╔══██║ ╚████╔╝ ╚════██║██╔═██║    ██╔═╝ 
- ██║     ███████╗██║  ██║███████║██║  ██║  ╚██╔╝  ███████║██║  ██║   ╚═╝
+ ██╔════╝██║     ██╔══██╗██╔════╝██║  ██║██║   ██║██╔════╝██╔══██╗   ██╗     ██╗
+ █████╗  ██║     ███████║███████╗███████║╚██╗ ██╔╝███████╗███████║ ██████╗ ██████╗
+ ██╔══╝  ██║     ██╔══██║╚════██║██╔══██║ ╚████╔╝ ╚════██║██╔═██║    ██╔═╝   ██╔═╝
+ ██║     ███████╗██║  ██║███████║██║  ██║  ╚██╔╝  ███████║██║  ██║   ╚═╝     ╚═╝
  ╚═╝     ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝
 """)
 
@@ -299,7 +308,7 @@ class FlashVSRFullPipeline(BasePipeline):
     def decode_video(self, latents, tiled=True, tile_size=(34, 34), tile_stride=(18, 16)):
         frames = self.vae.decode(latents, device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
         return frames
-    
+
     def offload_model(self, keep_vae=False):
         self.dit.clear_cross_kv()
         self.prompt_emb_posi['stats'] = "offload"
@@ -340,6 +349,7 @@ class FlashVSRFullPipeline(BasePipeline):
         color_fix = True,
         unload_dit = False,
         force_offload = False,
+        enable_debug_logging = False, # Pass debug flag if needed
     ):
         # 只接受 cfg=1.0（与原代码一致）
         assert cfg_scale == 1.0, "cfg_scale must be 1.0"
@@ -370,19 +380,43 @@ class FlashVSRFullPipeline(BasePipeline):
 
         process_total_num = (num_frames - 1) // 8 - 2
         is_stream = True
-        
+
         if self.prompt_emb_posi['stats'] == "offload":
             self.init_cross_kv(context_tensor=self.prompt_emb_posi['context'])
-        self.load_models_to_device(["dit", "vae"])
+
+        # =======================================================================
+        # FIX: Use TCDecoder with LQ conditioning (official FlashVSR approach)
+        # =======================================================================
+        # The key insight from the official FlashVSR repo is that TCDecoder is used
+        # for all modes with LQ conditioning during decode. This is critical because
+        # TCDecoder.decode_video() takes a `cond` parameter that concatenates the 
+        # low-quality frames with latents before decoding.
+        # =======================================================================
+        
+        # Load DiT for processing
+        self.load_models_to_device(["dit"])
         self.dit.LQ_proj_in.to(self.device)
+        
+        # Move TCDecoder to device if available
+        if self.TCDecoder is not None:
+            self.TCDecoder.to(self.device)
 
         # 清理可能存在的 LQ_proj_in cache
         if hasattr(self.dit, "LQ_proj_in"):
             self.dit.LQ_proj_in.clear_cache()
 
-        latents_total = []
-        self.vae.clear_cache()
+        # Track LQ frame indices (gold standard approach from tiny-long)
+        frames_total = []
+        LQ_pre_idx = 0
+        LQ_cur_idx = 0
         
+        # Clean decoder memory if using TCDecoder
+        if self.TCDecoder is not None:
+            self.TCDecoder.clean_mem()
+        else:
+            # Fallback to VAE if TCDecoder not loaded
+            self.vae.clear_cache()
+
         with torch.no_grad():
             for cur_process_idx in progress_bar_cmd(range(process_total_num)):
                 if cur_process_idx == 0:
@@ -392,7 +426,7 @@ class FlashVSRFullPipeline(BasePipeline):
                     inner_loop_num = 7
                     for inner_idx in range(inner_loop_num):
                         cur = self.denoising_model().LQ_proj_in.stream_forward(
-                            LQ_video[:, :, max(0, inner_idx*4-3):(inner_idx+1)*4-3, :, :]
+                            LQ_video[:, :, max(0, inner_idx*4-3):(inner_idx+1)*4-3, :, :].to(self.device)
                         ) if LQ_video is not None else None
                         if cur is None:
                             continue
@@ -401,13 +435,14 @@ class FlashVSRFullPipeline(BasePipeline):
                         else:
                             for layer_idx in range(len(LQ_latents)):
                                 LQ_latents[layer_idx] = torch.cat([LQ_latents[layer_idx], cur[layer_idx]], dim=1)
+                    LQ_cur_idx = (inner_loop_num-1)*4-3  # = 21 for inner_loop_num=7
                     cur_latents = latents[:, :, :6, :, :]
                 else:
                     LQ_latents = None
                     inner_loop_num = 2
                     for inner_idx in range(inner_loop_num):
                         cur = self.denoising_model().LQ_proj_in.stream_forward(
-                            LQ_video[:, :, cur_process_idx*8+17+inner_idx*4:cur_process_idx*8+21+inner_idx*4, :, :]
+                            LQ_video[:, :, cur_process_idx*8+17+inner_idx*4:cur_process_idx*8+21+inner_idx*4, :, :].to(self.device)
                         ) if LQ_video is not None else None
                         if cur is None:
                             continue
@@ -416,8 +451,9 @@ class FlashVSRFullPipeline(BasePipeline):
                         else:
                             for layer_idx in range(len(LQ_latents)):
                                 LQ_latents[layer_idx] = torch.cat([LQ_latents[layer_idx], cur[layer_idx]], dim=1)
+                    LQ_cur_idx = cur_process_idx*8+21+(inner_loop_num-2)*4
                     cur_latents = latents[:, :, 4+cur_process_idx*2:6+cur_process_idx*2, :, :]
-                
+
                 # 推理（无 motion_controller / vace）
                 noise_pred_posi, pre_cache_k, pre_cache_v = model_fn_wan_video(
                     self.dit,
@@ -441,38 +477,62 @@ class FlashVSRFullPipeline(BasePipeline):
 
                 # 更新 latent
                 cur_latents = cur_latents - noise_pred_posi
-                latents_total.append(cur_latents)
-            
+                
+                # =======================================================================
+                # DECODE: Use TCDecoder with LQ conditioning (like tiny-long)
+                # =======================================================================
+                cur_LQ_frame = LQ_video[:,:,LQ_pre_idx:LQ_cur_idx,:,:].to(self.device)
+                
+                if self.TCDecoder is not None:
+                    # TCDecoder with LQ conditioning - the official FlashVSR approach
+                    # This is critical: TCDecoder.decode_video takes cond parameter
+                    # Input: cur_latents is (B, C, T, H, W), transpose to (B, T, C, H, W) for TCDecoder
+                    # Output: TCDecoder returns (B, T, 3, H, W), transpose back to (B, 3, T, H, W)
+                    cur_frames = self.TCDecoder.decode_video(
+                        cur_latents.transpose(1, 2),
+                        parallel=False,
+                        show_progress_bar=False,
+                        cond=cur_LQ_frame  # LQ conditioning is key!
+                    ).transpose(1, 2).mul_(2).sub_(1)  # Convert output from [0,1] to [-1,1]
+                else:
+                    # Fallback to VAE if TCDecoder not available (may have issues)
+                    cur_frames = self.vae.stream_decode([cur_latents])
+                    cur_frames = cur_frames.clamp_(-1, 1)
+                
+                # 颜色校正（per-chunk, like tiny-long）
+                try:
+                    if color_fix:
+                        cur_frames = self.ColorCorrector(
+                            cur_frames.to(device=self.device),
+                            cur_LQ_frame,
+                            clip_range=(-1, 1),
+                            chunk_size=None,
+                            method='adain'
+                        )
+                except:
+                    pass
+                
+                frames_total.append(cur_frames.to('cpu'))
+                LQ_pre_idx = LQ_cur_idx
+                
+                if unload_dit:
+                    del noise_pred_posi, cur_frames, cur_latents, cur_LQ_frame
+                    clean_vram()
+
             if hasattr(self.dit, "LQ_proj_in"):
                 self.dit.LQ_proj_in.clear_cache()
-            
-            if unload_dit and hasattr(self, 'dit') and not next(self.dit.parameters()).is_cpu:
-                print("[FlashVSR] Offloading DiT to the CPU to free up VRAM...")
-                self.offload_model(keep_vae=True)
-            
-            latents = torch.cat(latents_total, dim=2)
-            
-            # Decode
-            print("[FlashVSR] Starting VAE decoding...")
-            frames = self.decode_video(latents, **tiler_kwargs)
-            
-            self.vae.clear_cache()
+
+            # Clean up decoder
+            if self.TCDecoder is not None:
+                self.TCDecoder.clean_mem()
+            else:
+                self.vae.clear_cache()
+                
             if force_offload:
                 self.offload_model()
-                
-            # 颜色校正（wavelet）
-            try:
-                if color_fix:
-                    frames = self.ColorCorrector(
-                        frames.to(device=LQ_video.device),
-                        LQ_video[:, :, :frames.shape[2], :, :],
-                        clip_range=(-1, 1),
-                        chunk_size=16,
-                        method='adain'
-                    )
-            except:
-                pass
-        
+
+            frames = torch.cat(frames_total, dim=2)
+
         return frames[0]
 
 
@@ -488,7 +548,7 @@ class TeaCache:
         self.rel_l1_thresh = rel_l1_thresh
         self.previous_residual = None
         self.previous_hidden_states = None
-        
+
         self.coefficients_dict = {
             "Wan2.1-T2V-1.3B": [-5.21862437e+04, 9.23041404e+03, -5.28275948e+02, 1.36987616e+01, -4.99875664e-02],
             "Wan2.1-T2V-14B":  [-3.03318725e+05, 4.90537029e+04, -2.65530556e+03, 5.87365115e+01, -3.15583525e-01],
