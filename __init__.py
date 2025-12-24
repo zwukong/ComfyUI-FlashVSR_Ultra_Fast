@@ -1,16 +1,17 @@
-# 1. 'nodes.py' faylından 'FlashVSR' class-ını çağırırıq
-from .nodes import FlashVSR
+from .nodes import FlashVSRNode, FlashVSRNodeAdv, FlashVSRNodeInitPipe
 
-# 2. Burada sol tərəfə "FlashVSR_Stable" yazırıq. 
-# Bu, ComfyUI-ın node-u sistemdə tanıdığı unikal ID olacaq.
+# Node-ların sistemdəki (kod) adları - hamısının sonuna _Stable artırdım
 NODE_CLASS_MAPPINGS = {
-    "FlashVSR_Stable": FlashVSR
+    "FlashVSR_Stable": FlashVSRNode,
+    "FlashVSR_Stable_Adv": FlashVSRNodeAdv,
+    "FlashVSR_Stable_Pipe": FlashVSRNodeInitPipe
 }
 
-# 3. Bu isə menyuda (Add Node menyusunda) görünən addır.
-# İstədiyiniz kimi yaza bilərsiniz, mən mötərizədə Stable yazdım.
+# Node-ların menyuda görünən adları
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "FlashVSR_Stable": "FlashVSR (Stable)"
+    "FlashVSR_Stable": "FlashVSR Ultra-Fast (Stable)",
+    "FlashVSR_Stable_Adv": "FlashVSR Advanced (Stable)",
+    "FlashVSR_Stable_Pipe": "FlashVSR Init Pipe (Stable)"
 }
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
