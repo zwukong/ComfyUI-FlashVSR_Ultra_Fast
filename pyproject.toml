@@ -1,8 +1,7 @@
-$content = @"
 [project]
 name = "ComfyUI-FlashVSR_Stable"
 description = "ComfyUI-FlashVSR_Stable official ComfyUI integration: High-performance Video Super Resolution for ComfyUI with VRAM optimization."
-version = "1.2.6"
+version = "1.2.7"
 authors = [
     {name = "naxci1"},
 ]
@@ -22,6 +21,3 @@ PublisherId = "naxci1"
 DisplayName = "ComfyUI-FlashVSR_Stable"
 Icon = "https://github.com/naxci1/ComfyUI-FlashVSR_Stable/raw/main/workflow/logo_tr.png"
 includes = []
-"@
-
-Set-Content -Path pyproject.toml -Value $content -Encoding UTF8
