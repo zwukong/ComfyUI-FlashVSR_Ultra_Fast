@@ -468,11 +468,12 @@ class FlashVSRTinyPipeline(BasePipeline):
 
                     # Calculate expected output temporal dimension
                     # TCDecoder has 2 TGrow(stride=2) layers, so T is multiplied by 4
-                    # Trimming removes first 3 frames only when memory is uninitialized
+                    # Trimming removes first `frames_to_trim` frames only when memory is uninitialized
                     # Check if this is the first tile to determine trim behavior
+                    # Note: Index -8 checks a specific MemBlock in the decoder to determine if state exists
                     sample_tile_key = (0, 0)
                     if sample_tile_key not in vae_tile_states or vae_tile_states[sample_tile_key][-8] is None:
-                        # First decode - trimming will occur
+                        # First decode - trimming will occur (frames_to_trim = 2**sum(decoder_time_upscale) - 1 = 3)
                         T_out = T * 4 - self.TCDecoder.frames_to_trim
                     else:
                         # Subsequent decode - no trimming
