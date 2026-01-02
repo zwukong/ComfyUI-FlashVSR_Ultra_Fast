@@ -3,7 +3,6 @@ import os
 import time
 from typing import Optional, Tuple, Literal
 
-import gc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -167,13 +166,12 @@ class FlashVSRTinyPipeline(BasePipeline):
         self.ColorCorrector = TorchColorCorrectorWavelet(levels=5)
 
         print(r"""
-███████╗██╗      █████╗ ███████╗██╗  ██╗██╗   ██╗███████╗█████╗
-██╔════╝██║     ██╔══██╗██╔════╝██║  ██║██║   ██║██╔════╝██╔══██╗
-█████╗  ██║     ███████║███████╗███████║╚██╗ ██╔╝███████╗███████║
-██╔══╝  ██║     ██╔══██║╚════██║██╔══██║ ╚████╔╝ ╚════██║██╔═██║
-██║     ███████╗██║  ██║███████║██║  ██║  ╚██╔╝  ███████║██║  ██║
-╚═╝     ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝
-                         ⚡FlashVSR
+ ███████╗██╗      █████╗ ███████╗██╗  ██╗██╗   ██╗███████╗█████╗
+ ██╔════╝██║     ██╔══██╗██╔════╝██║  ██║██║   ██║██╔════╝██╔══██╗   ██╗     ██╗
+ █████╗  ██║     ███████║███████╗███████║╚██╗ ██╔╝███████╗███████║ ██████╗ ██████╗
+ ██╔══╝  ██║     ██╔══██║╚════██║██╔══██║ ╚████╔╝ ╚════██║██╔═██║    ██╔═╝   ██╔═╝
+ ██║     ███████╗██║  ██║███████║██║  ██║  ╚██╔╝  ███████║██║  ██║   ╚═╝     ╚═╝
+ ╚═╝     ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝
 """)
 
     def enable_vram_management(self, num_persistent_param_in_dit=None):
@@ -255,6 +253,7 @@ class FlashVSRTinyPipeline(BasePipeline):
         if self.prompt_emb_posi is None:
             self.prompt_emb_posi = {}
         self.prompt_emb_posi['context'] = ctx
+        self.prompt_emb_posi['stats'] = "load"
 
         if hasattr(self.dit, "reinit_cross_kv"):
             self.dit.reinit_cross_kv(ctx)
@@ -280,16 +279,25 @@ class FlashVSRTinyPipeline(BasePipeline):
     def _decode_video(self, latents, tiled=True, tile_size=(34, 34), tile_stride=(18, 16)):
         frames = self.vae.decode(latents, device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
         return frames
-    
+
     def decode_video(self, latents, cond=None, **kwargs):
         frames = self.TCDecoder.decode_video(
             latents.transpose(1, 2), # TCDecoder 需要 (B, F, C, H, W)
-            parallel=False, 
-            show_progress_bar=False, 
+            parallel=False,
+            show_progress_bar=False,
             cond=cond
         ).transpose(1, 2).mul_(2).sub_(1) # 转回 (B, C, F, H, W) 格式，范围 -1 to 1
-        
+
         return frames
+
+    def offload_model(self, keep_vae=False):
+        self.dit.clear_cross_kv()
+        self.prompt_emb_posi['stats'] = "offload"
+        self.load_models_to_device([])
+        if hasattr(self.dit, "LQ_proj_in"):
+            self.dit.LQ_proj_in.to('cpu')
+        if not keep_vae:
+            self.TCDecoder.to('cpu')
 
     @torch.no_grad()
     def __call__(
@@ -309,7 +317,7 @@ class FlashVSRTinyPipeline(BasePipeline):
         tile_size=(60, 104),
         tile_stride=(30, 52),
         tea_cache_l1_thresh=None,
-        tea_cache_model_id="Wan2.1-T2V-14B",
+        tea_cache_model_id="Wan2.1-T2V-1.3B",
         progress_bar_cmd=tqdm,
         progress_bar_st=None,
         LQ_video=None,
@@ -320,11 +328,12 @@ class FlashVSRTinyPipeline(BasePipeline):
         local_range = 9,
         color_fix = True,
         unload_dit = False,
-        skip_vae = False,
+        force_offload = False,
+        enable_debug_logging = False,
     ):
         # 只接受 cfg=1.0（与原代码一致）
         assert cfg_scale == 1.0, "cfg_scale must be 1.0"
-        
+
         # 要求：必须先 init_cross_kv()
         if self.prompt_emb_posi is None or 'context' not in self.prompt_emb_posi:
             raise RuntimeError(
@@ -351,23 +360,30 @@ class FlashVSRTinyPipeline(BasePipeline):
         # noise = noise.to(dtype=self.torch_dtype, device=self.device)
         latents = noise
 
+        process_total_num = (num_frames - 8 - 1) // 8 + 1 # Adjusted logic from tiny-long or similar
+        # tiny logic was: (num_frames - 1) // 8 - 2
+        # tiny-long logic: (num_frames - 1) // 8 - 2
         process_total_num = (num_frames - 1) // 8 - 2
+
         is_stream = True
+
+        if self.prompt_emb_posi['stats'] == "offload":
+            self.init_cross_kv(context_tensor=self.prompt_emb_posi['context'])
+        self.load_models_to_device(["dit"])
+        self.dit.LQ_proj_in.to(self.device)
+        self.TCDecoder.to(self.device)
 
         # 清理可能存在的 LQ_proj_in cache
         if hasattr(self.dit, "LQ_proj_in"):
             self.dit.LQ_proj_in.clear_cache()
 
-        latents_total = []
-        self.TCDecoder.clean_mem()
+        frames_total = [] # Streaming accumulator
         LQ_pre_idx = 0
         LQ_cur_idx = 0
-        
-        if unload_dit and hasattr(self, 'dit') and self.dit is not None:
-            current_dit_device = next(iter(self.dit.parameters())).device
-            if str(current_dit_device) != str(self.device):
-                print(f"[FlashVSR] DiT is on {current_dit_device}, moving it to target device {self.device}...")
-                self.dit.to(self.device)
+        self.TCDecoder.clean_mem()
+
+        # Tile states for VAE
+        vae_tile_states = {}
 
         with torch.no_grad():
             for cur_process_idx in progress_bar_cmd(range(process_total_num)):
@@ -378,7 +394,7 @@ class FlashVSRTinyPipeline(BasePipeline):
                     inner_loop_num = 7
                     for inner_idx in range(inner_loop_num):
                         cur = self.denoising_model().LQ_proj_in.stream_forward(
-                            LQ_video[:, :, max(0, inner_idx*4-3):(inner_idx+1)*4-3, :, :]
+                            LQ_video[:, :, max(0, inner_idx*4-3):(inner_idx+1)*4-3, :, :].to(self.device)
                         ) if LQ_video is not None else None
                         if cur is None:
                             continue
@@ -394,7 +410,7 @@ class FlashVSRTinyPipeline(BasePipeline):
                     inner_loop_num = 2
                     for inner_idx in range(inner_loop_num):
                         cur = self.denoising_model().LQ_proj_in.stream_forward(
-                            LQ_video[:, :, cur_process_idx*8+17+inner_idx*4:cur_process_idx*8+21+inner_idx*4, :, :]
+                            LQ_video[:, :, cur_process_idx*8+17+inner_idx*4:cur_process_idx*8+21+inner_idx*4, :, :].to(self.device)
                         ) if LQ_video is not None else None
                         if cur is None:
                             continue
@@ -405,7 +421,7 @@ class FlashVSRTinyPipeline(BasePipeline):
                                 LQ_latents[layer_idx] = torch.cat([LQ_latents[layer_idx], cur[layer_idx]], dim=1)
                     LQ_cur_idx = cur_process_idx*8+21+(inner_loop_num-2)*4
                     cur_latents = latents[:, :, 4+cur_process_idx*2:6+cur_process_idx*2, :, :]
-                        
+
                 # 推理（无 motion_controller / vace）
                 noise_pred_posi, pre_cache_k, pre_cache_v = model_fn_wan_video(
                     self.dit,
@@ -429,42 +445,115 @@ class FlashVSRTinyPipeline(BasePipeline):
 
                 # 更新 latent
                 cur_latents = cur_latents - noise_pred_posi
-                latents_total.append(cur_latents)
-                LQ_pre_idx = LQ_cur_idx
-            
-            if unload_dit and hasattr(self, 'dit') and not next(self.dit.parameters()).is_cpu:
+
+                # Streaming Decode!
+                cur_LQ_frame = LQ_video[:,:,LQ_pre_idx:LQ_cur_idx,:,:].to(self.device)
+
+                if tiled: # tiled_vae logic
+                    B, C, T, H, W = cur_latents.shape
+
+                    l_tile_h, l_tile_w = tile_size
+                    l_stride_h, l_stride_w = tile_stride
+
+                    if isinstance(l_tile_h, tuple): l_tile_h = l_tile_h[0]
+                    if isinstance(l_tile_w, tuple): l_tile_w = l_tile_w[0]
+
+                    l_tile_h = max(l_tile_h // 8, 4)
+                    l_tile_w = max(l_tile_w // 8, 4)
+                    l_stride_h = max(l_stride_h // 8, 1)
+                    l_stride_w = max(l_stride_w // 8, 1)
+
+                    out_H = H * 8
+                    out_W = W * 8
+
+                    # Calculate expected output temporal dimension
+                    # TCDecoder has 2 TGrow(stride=2) layers, so T is multiplied by 4
+                    # Trimming removes first `frames_to_trim` frames only when memory is uninitialized
+                    # Check if this is the first tile to determine trim behavior
+                    # Note: Index -8 checks a specific MemBlock in the decoder to determine if state exists
+                    sample_tile_key = (0, 0)
+                    if sample_tile_key not in vae_tile_states or vae_tile_states[sample_tile_key][-8] is None:
+                        # First decode - trimming will occur (frames_to_trim = 2**sum(decoder_time_upscale) - 1 = 3)
+                        T_out = T * 4 - self.TCDecoder.frames_to_trim
+                    else:
+                        # Subsequent decode - no trimming
+                        T_out = T * 4
+
+                    cur_frames = torch.zeros((B, 3, T_out, out_H, out_W), dtype=cur_latents.dtype, device='cpu')
+                    weights = torch.zeros((B, 3, T_out, out_H, out_W), dtype=cur_latents.dtype, device='cpu')
+
+                    for y in range(0, H, l_stride_h):
+                        for x in range(0, W, l_stride_w):
+                            y_end = min(y + l_tile_h, H)
+                            x_end = min(x + l_tile_w, W)
+
+                            if y_end <= y or x_end <= x: continue
+
+                            lat_tile = cur_latents[:, :, :, y:y_end, x:x_end]
+                            cond_y, cond_x = y * 8, x * 8
+                            cond_y_end, cond_x_end = y_end * 8, x_end * 8
+                            cond_tile = cur_LQ_frame[:, :, :, cond_y:cond_y_end, cond_x:cond_x_end]
+
+                            tile_key = (y, x)
+                            if tile_key not in vae_tile_states:
+                                vae_tile_states[tile_key] = [None] * len(self.TCDecoder.decoder)
+                            mem_tile = vae_tile_states[tile_key]
+
+                            out_tile, new_mem_tile = self.TCDecoder.decode_video(
+                                lat_tile.transpose(1, 2),
+                                parallel=False,
+                                show_progress_bar=False,
+                                cond=cond_tile,
+                                mem=mem_tile
+                            )
+                            vae_tile_states[tile_key] = new_mem_tile
+
+                            out_tile = out_tile.transpose(1, 2).to('cpu')
+                            th, tw = out_tile.shape[3], out_tile.shape[4]
+                            mask = torch.ones((1, 1, 1, th, tw), device='cpu')
+                            y_out, x_out = y * 8, x * 8
+                            cur_frames[:, :, :, y_out:y_out+th, x_out:x_out+tw] += out_tile * mask
+                            weights[:, :, :, y_out:y_out+th, x_out:x_out+tw] += mask
+
+                    weights[weights == 0] = 1.0
+                    cur_frames = cur_frames / weights
+                    cur_frames = cur_frames.mul_(2).sub_(1)
+                else:
+                    cur_frames = self.TCDecoder.decode_video(
+                        cur_latents.transpose(1, 2),
+                        parallel=False,
+                        show_progress_bar=False,
+                        cond=cur_LQ_frame
+                    ).transpose(1, 2).mul_(2).sub_(1)
+
+                # 颜色校正（wavelet）
                 try:
-                    del pre_cache_k, pre_cache_v
-                except NameError:
+                    if color_fix:
+                        cur_frames = self.ColorCorrector(
+                            cur_frames.to(device=self.device),
+                            cur_LQ_frame,
+                            clip_range=(-1, 1),
+                            chunk_size=16,
+                            method='adain'
+                        ).to('cpu') # Ensure back to CPU
+                except:
                     pass
-                print("[FlashVSR] Offloading DiT to the CPU to free up VRAM...")
-                self.dit.to('cpu')
-                clean_vram()
-            
-            latents = torch.cat(latents_total, dim=2)
-            
-            del latents_total
-            clean_vram()
-                
-            if skip_vae:
-                return latents
 
-            # Decode
-            print("[FlashVSR] Starting VAE decoding...")
-            frames = self.TCDecoder.decode_video(latents.transpose(1, 2),parallel=False, show_progress_bar=False, cond=LQ_video[:,:,:LQ_cur_idx,:,:]).transpose(1, 2).mul_(2).sub_(1)
+                frames_total.append(cur_frames)
+                LQ_pre_idx = LQ_cur_idx
 
-            # 颜色校正（wavelet）
-            try:
-                if color_fix:
-                    frames = self.ColorCorrector(
-                        frames.to(device=LQ_video.device),
-                        LQ_video[:, :, :frames.shape[2], :, :],
-                        clip_range=(-1, 1),
-                        chunk_size=16,
-                        method='adain'
-                    )
-            except:
-                pass
+                if unload_dit:
+                    del noise_pred_posi, cur_frames, cur_latents, cur_LQ_frame
+                    clean_vram()
+
+            if hasattr(self.dit, "LQ_proj_in"):
+                self.dit.LQ_proj_in.clear_cache()
+
+            self.TCDecoder.clean_mem()
+            if force_offload:
+                self.offload_model()
+
+            frames = torch.cat(frames_total, dim=2)
 
         return frames[0]
 
@@ -481,7 +570,7 @@ class TeaCache:
         self.rel_l1_thresh = rel_l1_thresh
         self.previous_residual = None
         self.previous_hidden_states = None
-        
+
         self.coefficients_dict = {
             "Wan2.1-T2V-1.3B": [-5.21862437e+04, 9.23041404e+03, -5.28275948e+02, 1.36987616e+01, -4.99875664e-02],
             "Wan2.1-T2V-14B":  [-3.03318725e+05, 4.90537029e+04, -2.65530556e+03, 5.87365115e+01, -3.15583525e-01],
